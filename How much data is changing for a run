@@ -1,0 +1,133 @@
+import "experimental"
+import "math"
+
+
+
+
+measurement1_name = "go_memstats_alloc_bytes"
+
+
+bucket1 =  "terasort1/autogen"
+node_name1 = "kubeslave2"
+
+
+bucket2 =  "terasort2/autogen"
+node_name2 = "kubeslave2"
+
+
+bucket3 = "rf1/autogen"
+node_name3 = "kubeslave2"
+
+
+
+
+//how often do you want data to be retreived
+//I tried to go below 30s but the data still shows the values between a 30s duration
+dataFrequency =15m
+dataFreq = 15
+
+
+
+
+
+
+getData= (bucketName, measurementName, nodeName) =>{
+
+
+    data = from(bucket: bucketName)
+        |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+        |> filter(fn: (r) => r["_measurement"] == measurementName)
+        |> filter(fn: (r) => r["__name__"] == measurementName)
+        |> filter(fn: (r) => r["node"] == nodeName)
+        |> filter(fn: (r) => r["endpoint"] == "https-metrics")
+	  //|> filter(fn: (r) => r["container"] == "prometheus-config-reloader")
+
+
+
+
+
+
+       
+        |> set(key: "WorkBench", value: bucketName + " " + nodeName)
+        |> group(columns: ["WorkBench"])
+       // |> group(columns: [bucketName]) //can't group by name here since they all have the same name
+        |> aggregateWindow(every: dataFrequency, fn: mean, createEmpty: false)
+        |> map(fn: (r) => ({ _time: r._time, WorkBench: r.WorkBench, _value: r._value }))
+    return data
+}
+
+
+// Using the function to generate data for each bucket
+t1 = getData(
+    bucketName: bucket1,
+    measurementName: measurement1_name,
+    nodeName: node_name1,
+)
+
+
+
+
+
+
+
+
+t2 = getData(
+    bucketName: bucket2,
+    measurementName: measurement1_name,
+    nodeName: node_name2,
+)
+
+
+
+
+t3 = getData(
+    bucketName: bucket3,
+    measurementName: measurement1_name,
+    nodeName: node_name3,
+)
+
+
+
+
+diffData1 = t1
+    |> map(fn: (r) => ({r with difference: r._value}))
+    |> difference(columns: ["difference"], keepFirst: true)
+    |> map(fn: (r) => ({ r with
+       " Percentage Increase/Decrease": if exists r.difference then (r.difference /  (r._value - r.difference)) * 100.0 else 0.0,  // r.prev_value - r._value is used to get the previous value of the
+       
+    }))
+    |> yield(name: "percentage_difference_t1")
+
+
+
+
+diffData3 = t3
+    |> map(fn: (r) => ({r with difference: r._value}))
+    |> difference(columns: ["difference"], keepFirst: true)
+    |> map(fn: (r) => ({ r with
+       " Percentage Increase/Decrease": if exists r.difference then (r.difference /  (r._value - r.difference)) * 100.0 else 0.0,  // r.prev_value - r._value is used to get the previous value of the
+       
+    }))
+    |> yield(name: "percentage_difference_t3")
+
+
+
+
+
+
+
+
+//pivot
+//How the values of each change numerically
+diffComparison = union(tables: [diffData1, diffData3])
+|> experimental.alignTime(alignTo: v.timeRangeStart)
+|> pivot(rowKey: ["_time"], columnKey: ["WorkBench"], valueColumn: "difference")
+//|> yield(name: "difference #")
+
+
+//How the values of each run change in terms of percentage
+diffComparison2 = union(tables: [diffData1, diffData3])
+|> experimental.alignTime(alignTo: v.timeRangeStart)
+|> pivot(rowKey: ["_time"], columnKey: ["WorkBench"], valueColumn: " Percentage Increase/Decrease")
+|> yield(name: "difference %")
+
