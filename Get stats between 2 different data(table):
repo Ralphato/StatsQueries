@@ -1,0 +1,268 @@
+
+
+import "experimental"
+import "math"
+
+
+measurement1_name = "go_memstats_alloc_bytes"
+
+
+bucket1 =  "terasort1/autogen"
+node_name1 = "kubeslave2"
+
+
+bucket2 =  "terasort2/autogen"
+node_name2 = "kubeslave2"
+
+
+bucket3 = "rf1/autogen"
+node_name3 = "kubeslave2"
+
+
+
+
+full_name1 = bucket1 + " " + node_name1
+full_name3 = bucket3 + " " + node_name3
+//how often do you want data to be retreived
+//I tried to go below 30s but the data still shows the values between a 30s duration
+dataFrequency = 30s
+dataFreq = 30
+
+
+
+
+
+
+getData= (bucketName, measurementName, nodeName, workBenchNumber) =>{
+
+
+    data = from(bucket: bucketName)
+        |> range(start: v.timeRangeStart, stop: v.timeRangeStop)
+        |> filter(fn: (r) => r["_measurement"] == measurementName)
+        |> filter(fn: (r) => r["__name__"] == measurementName)
+        |> filter(fn: (r) => r["node"] == nodeName)
+        |> filter(fn: (r) => r["endpoint"] == "https-metrics")
+	 //|> filter(fn: (r) => r["container"] == "prometheus-config-reloader")
+
+
+
+
+
+
+       
+        |> set(key: "WorkBench", value: workBenchNumber)
+        |> group(columns: ["WorkBench"])
+       // |> group(columns: [bucketName]) //can't group by name here since they all have the same name
+        |> aggregateWindow(every: dataFrequency, fn: mean, createEmpty: false)
+        |> map(fn: (r) => ({ _time: r._time, WorkBench: r.WorkBench, _value: r._value }))
+    return data
+}
+
+
+
+
+//function to get the percentage difference between 2 values
+getPercentageDif = (unionData) =>{
+aggregatedData = unionData
+  |> group(columns: ["_time"] )  // Group by time to ensure we aggregate only data that has the same timestamp
+  |> reduce(fn: (r, accumulator) => ({
+      sum: accumulator.sum + r._value,
+      subs: math.abs( x: r._value - accumulator.subs),
+      //name: r.__name__,
+      //workBench: workBenchName
+    }), identity: {sum: 0.0, subs: 0.0})
+   |> group( )
+  |> map(fn: (r) => ({
+      _time: r._time,
+     // name: r.name,
+      //workBench: r.workBench,
+      //count: r.count,
+     // Sum: r.sum / 2.0,
+     // Subtracting: r.subs,
+    _value: if (r.subs / (r.sum/2.0)) * 100.0 == 200 then 0.0 else (r.subs / (r.sum/2.0)) * 100.0
+    }))
+return aggregatedData
+}
+
+
+
+
+// Using the function to generate data for each bucket
+t1 = getData(
+    bucketName: bucket1,
+    measurementName: measurement1_name,
+    nodeName: node_name1,
+    workBenchNumber: "WorkBench1"
+)
+
+
+
+
+
+
+
+
+t2 = getData(
+    bucketName: bucket2,
+    measurementName: measurement1_name,
+    nodeName: node_name2,
+    workBenchNumber: "WorkBench2"
+)
+
+
+
+
+t3 = getData(
+    bucketName: bucket3,
+    measurementName: measurement1_name,
+    nodeName: node_name3,
+    workBenchNumber: "WorkBench3"
+)
+
+
+
+
+allData1 = union(tables: [t1, t3])
+|> experimental.alignTime(alignTo: v.timeRangeStart)
+//|> yield(name: "dsf")
+
+
+averagedData = getPercentageDif(unionData: allData1) //gets the percentage difference between 2 values
+|> set(key: "WorkBench", value: " PercentDif")
+
+
+totalData = union(tables: [allData1, averagedData])
+//|> yield(name: "dsf")
+
+
+
+
+combinedData1 = totalData
+|> pivot(rowKey: ["_time"], columnKey: ["WorkBench"], valueColumn: "_value")
+|> set(key: "  Measurement", value: measurement1_name)
+|> group(columns: ["  Measurement"]) //u can use spaces to order where the value would be
+|> rename(columns: { WorkBench1: full_name1, WorkBench3: full_name3})
+|> yield(name: "sa")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+//Gathering stats
+
+
+
+
+count = allData1
+    |> count(column: "_value")
+    |> map(fn: (r) => ({WorkBench: r.WorkBench, _value: float(v:r._value)}))
+    |> set(key: "Type", value: "Count")
+    //|> yield(name:"count")
+
+
+sum = allData1
+    |> reduce(fn: (r, accumulator) => ({sum: r._value + accumulator.sum}), identity: {sum: 0.0})
+    |> map(fn: (r) => ({WorkBench: r.WorkBench, _value: r.sum}))
+    |> set(key: "Type", value: "Sum")
+
+
+percentile75 = allData1
+    |> quantile(column: "_value", q: 0.75, method: "estimate_tdigest")
+    |> map(fn: (r) => ({WorkBench: r.WorkBench, _value: r._value}))
+    |> set(key: "Type", value: "75 percentile")
+
+
+percentile50 = allData1
+    |> quantile(column: "_value", q: 0.50, method: "estimate_tdigest")
+    |> map(fn: (r) => ({WorkBench: r.WorkBench, _value: r._value}))
+    |> set(key: "Type", value: "50 percentile")
+
+
+percentile25 = allData1
+    |> quantile(column: "_value", q: 0.25, method: "estimate_tdigest")
+    |> map(fn: (r) => ({WorkBench: r.WorkBench, _value: r._value}))
+    |> set(key: "Type", value: "25 percentile")
+
+
+
+
+
+
+duration = allData1
+    |> reduce(fn: (r, accumulator) => ({_value: float(v:dataFreq) + accumulator._value}), identity: {_value: 0.0})
+    |> set(key: "Type", value: "duration(estimate)")
+
+
+
+
+meanStats = allData1
+    |> mean(column: "_value")
+    |> map(fn: (r) => ({WorkBench: r.WorkBench, _value: float(v:r._value)}))
+    |> set(key: "Type", value: "Mean")
+
+
+
+
+stddevStats = allData1
+    |> stddev(column: "_value")
+    |> map(fn: (r) => ({WorkBench: r.WorkBench, _value: float(v:r._value)}))
+    |> set(key: "Type", value: "Deviation")
+ 
+
+
+medianStats = allData1
+    |> median(column: "_value")
+    |> map(fn: (r) => ({WorkBench: r.WorkBench, _value: float(v:r._value)}))
+    |> set(key: "Type", value: "Median")
+ 
+
+
+minStats = allData1
+    |> min(column: "_value")
+    |> map(fn: (r) => ({WorkBench: r.WorkBench, _value: float(v:r._value)}))
+    |> set(key: "Type", value: "Min")
+
+
+maxStats = allData1
+    |> max(column: "_value")
+    |> map(fn: (r) => ({WorkBench: r.WorkBench, _value: float(v:r._value)}))
+    |> set(key: "Type", value: "Max")
+
+
+
+
+
+
+
+
+//combining stats
+  combinedStats = union(tables: [count, sum, percentile75, percentile50, percentile25, duration, meanStats, medianStats, maxStats, minStats, stddevStats])
+   
+    |> pivot(rowKey: ["Type"], columnKey: ["WorkBench"], valueColumn: "_value")
+    |> sort(columns: ["Type"])
+    |> map(fn: (r) => ({
+    r with PercentDifference :
+   ((math.abs(x: r.WorkBench1 - r.WorkBench3)) / ((r.WorkBench1 + r.WorkBench3) / 2.0)) * 100.0
+     }))
+    |> rename(columns: { WorkBench1: full_name1, WorkBench3: full_name3})
+   
+    |> yield(name: "fhsadas")
